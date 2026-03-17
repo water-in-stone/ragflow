@@ -38,8 +38,7 @@ from api.db.services.tenant_llm_service import TenantLLMService
 from api.db.services.task_service import TaskService, queue_tasks, cancel_all_task_of
 from api.db.joint_services.tenant_model_service import get_model_config_by_id, get_tenant_default_model_by_type, get_model_config_by_type_and_name
 from common.metadata_utils import meta_filter, convert_conditions
-from api.utils.api_utils import check_duplicate_ids, construct_json_result, get_error_data_result, get_parser_config, get_result, server_error_response, token_required, \
-    get_request_json
+from api.utils.api_utils import check_duplicate_ids, construct_json_result, get_error_data_result, get_parser_config, get_result, server_error_response, token_required, get_request_json
 from rag.app.qa import beAdoc, rmPrefix
 from rag.app.tag import label_question
 from rag.nlp import rag_tokenizer, search
@@ -59,6 +58,7 @@ class Chunk(BaseModel):
     document_id: str = ""
     docnm_kwd: str = ""
     important_keywords: list = Field(default_factory=list)
+    tag_kwd: list = Field(default_factory=list)
     questions: list = Field(default_factory=list)
     question_tks: str = ""
     image_id: str = ""
@@ -426,12 +426,12 @@ async def download(tenant_id, dataset_id, document_id):
 async def download_doc(document_id):
     token = request.headers.get("Authorization").split()
     if len(token) != 2:
-        return get_error_data_result(message='Authorization is not valid!')
+        return get_error_data_result(message="Authorization is not valid!")
     token = token[1]
     objs = APIToken.query(beta=token)
     if not objs:
         return get_error_data_result(message='Authentication error: API key is invalid!"')
-    
+
     if not document_id:
         return get_error_data_result(message="Specify document_id please.")
     doc = DocumentService.query(id=document_id)
@@ -565,28 +565,28 @@ def list_docs(dataset_id, tenant_id):
                     description: Processing status.
     """
     if not KnowledgebaseService.accessible(kb_id=dataset_id, user_id=tenant_id):
-      return get_error_data_result(message=f"You don't own the dataset {dataset_id}. ")
+        return get_error_data_result(message=f"You don't own the dataset {dataset_id}. ")
 
     q = request.args
     document_id = q.get("id")
-    name        = q.get("name")
+    name = q.get("name")
 
     if document_id and not DocumentService.query(id=document_id, kb_id=dataset_id):
         return get_error_data_result(message=f"You don't own the document {document_id}.")
     if name and not DocumentService.query(name=name, kb_id=dataset_id):
         return get_error_data_result(message=f"You don't own the document {name}.")
 
-    page        = int(q.get("page", 1))
-    page_size   = int(q.get("page_size", 30))
-    orderby     = q.get("orderby", "create_time")
-    desc        = str(q.get("desc", "true")).strip().lower() != "false"
-    keywords    = q.get("keywords", "")
+    page = int(q.get("page", 1))
+    page_size = int(q.get("page_size", 30))
+    orderby = q.get("orderby", "create_time")
+    desc = str(q.get("desc", "true")).strip().lower() != "false"
+    keywords = q.get("keywords", "")
 
     # filters - align with OpenAPI parameter names
-    suffix               = q.getlist("suffix")
-    run_status           = q.getlist("run")
-    create_time_from     = int(q.get("create_time_from", 0))
-    create_time_to       = int(q.get("create_time_to", 0))
+    suffix = q.getlist("suffix")
+    run_status = q.getlist("run")
+    create_time_from = int(q.get("create_time_from", 0))
+    create_time_to = int(q.get("create_time_to", 0))
     metadata_condition_raw = q.get("metadata_condition")
     metadata_condition = {}
     if metadata_condition_raw:
@@ -608,17 +608,11 @@ def list_docs(dataset_id, tenant_id):
         if metadata_condition.get("conditions") and not doc_ids_filter:
             return get_result(data={"total": 0, "docs": []})
 
-    docs, total = DocumentService.get_list(
-        dataset_id, page, page_size, orderby, desc, keywords, document_id, name, suffix, run_status_converted, doc_ids_filter
-    )
+    docs, total = DocumentService.get_list(dataset_id, page, page_size, orderby, desc, keywords, document_id, name, suffix, run_status_converted, doc_ids_filter)
 
     # time range filter (0 means no bound)
     if create_time_from or create_time_to:
-        docs = [
-            d for d in docs
-            if (create_time_from == 0 or d.get("create_time", 0) >= create_time_from)
-            and (create_time_to == 0 or d.get("create_time", 0) <= create_time_to)
-        ]
+        docs = [d for d in docs if (create_time_from == 0 or d.get("create_time", 0) >= create_time_from) and (create_time_to == 0 or d.get("create_time", 0) <= create_time_to)]
 
     # rename keys + map run status back to text for output
     key_mapping = {
@@ -682,7 +676,7 @@ async def metadata_batch_update(dataset_id, tenant_id):
     for d in deletes:
         if not isinstance(d, dict) or not d.get("key"):
             return get_error_data_result(message="Each delete requires key.")
-   
+
     if document_ids:
         kb_doc_ids = KnowledgebaseService.list_documents_by_ids([dataset_id])
         target_doc_ids = set(kb_doc_ids)
@@ -701,6 +695,7 @@ async def metadata_batch_update(dataset_id, tenant_id):
     target_doc_ids = list(target_doc_ids)
     updated = DocMetadataService.batch_update_metadata(dataset_id, target_doc_ids, updates, deletes)
     return get_result(data={"updated": updated, "matched_docs": len(target_doc_ids)})
+
 
 @manager.route("/datasets/<dataset_id>/documents", methods=["DELETE"])  # noqa: F821
 @token_required
@@ -957,7 +952,7 @@ async def stop_parsing(tenant_id, dataset_id):
         doc = DocumentService.query(id=id, kb_id=dataset_id)
         if not doc:
             return get_error_data_result(message=f"You don't own the document {id}.")
-        if doc[0].run != TaskStatus.RUNNING.value :
+        if doc[0].run != TaskStatus.RUNNING.value:
             return construct_json_result(
                 code=RetCode.DATA_ERROR,
                 message=DOC_STOP_PARSING_INVALID_STATE_MESSAGE,
@@ -1141,6 +1136,7 @@ async def list_chunks(tenant_id, dataset_id, document_id):
                 "document_id": sres.field[id]["doc_id"],
                 "docnm_kwd": sres.field[id]["docnm_kwd"],
                 "important_keywords": sres.field[id].get("important_kwd", []),
+                "tag_kwd": sres.field[id].get("tag_kwd", []),
                 "questions": sres.field[id].get("question_kwd", []),
                 "dataset_id": sres.field[id].get("kb_id", sres.field[id].get("dataset_id")),
                 "image_id": sres.field[id].get("img_id", ""),
@@ -1259,6 +1255,7 @@ async def add_chunk(tenant_id, dataset_id, document_id):
     if "tag_feas" in req:
         d["tag_feas"] = req["tag_feas"]
     import base64
+
     image_base64 = req.get("image_base64", None)
     if image_base64:
         d["img_id"] = "{}-{}".format(dataset_id, chunk_id)
@@ -1702,8 +1699,8 @@ async def retrieval_test(tenant_id):
     toc_enhance = req.get("toc_enhance", False)
     langs = req.get("cross_languages", [])
     if not isinstance(doc_ids, list):
-        return get_error_data_result("`documents` should be a list")   
-    if doc_ids: 
+        return get_error_data_result("`documents` should be a list")
+    if doc_ids:
         doc_ids_list = KnowledgebaseService.list_documents_by_ids(kb_ids)
         for doc_id in doc_ids:
             if doc_id not in doc_ids_list:
